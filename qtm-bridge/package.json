@@ -1,0 +1,14 @@
+{
+  "name": "qtm-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between Qualisys Track Manager and web browsers via WebSocket",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "osc": "^2.4.5",
+    "qualisys-rt": "^0.4.1",
+    "ws": "^8.14.2"
+  }
+}

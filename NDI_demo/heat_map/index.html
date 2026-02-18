@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Motion Heatmap</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Start screen -->
+  <div id="start-overlay">
+    <h2>Motion Heatmap</h2>
+    <p>
+      Detects motion from a camera feed and builds a
+      real-time heat map. Subtle movements accumulate
+      into glowing blobs over time.
+    </p>
+    <button id="start-btn">Start Camera</button>
+  </div>
+
+  <!-- Canvas goes here -->
+  <div id="canvas-wrap"></div>
+
+  <script src="../p5.min.js"></script>
+  <script src="sketch.js"></script>
+</body>
+</html>
