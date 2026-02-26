@@ -43,10 +43,26 @@ let clouds = [];
 // shifts with storm intensity
 let hueShift = 0;
 
+// ===== AUDIO =====
+let audioCtx = null;
+let audioInitialized = false;
+let showAudioPrompt = true;
+
+// rain layers
+let rainNoiseSource = null;
+let rainGain = null;
+let rainFilter = null;
+let stormNoiseSource = null;
+let stormGain = null;
+let stormFilter = null;
+
+// raindrop patter
+let patterGain = null;
+
 function setup() {
   createCanvas(windowWidth, windowHeight);
   colorMode(HSB, 360, 100, 100, 100);
-  
+
   bubbleX = width / 2;
   bubbleY = height / 2;
   bubbleTargetX = width / 2;
@@ -78,6 +94,204 @@ function setup() {
   };
 }
 
+// ============================================================
+// AUDIO SYSTEM - all procedural, no samples needed
+// ============================================================
+
+function initAudio() {
+  if (audioInitialized) return;
+
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) {
+    console.warn('Web Audio API not supported');
+    return;
+  }
+
+  // --- RAIN LAYER 1: light patter (higher freq white noise) ---
+  rainNoiseSource = createNoiseNode(audioCtx);
+  rainFilter = audioCtx.createBiquadFilter();
+  rainFilter.type = 'bandpass';
+  rainFilter.frequency.value = 3000;
+  rainFilter.Q.value = 0.5;
+  rainGain = audioCtx.createGain();
+  rainGain.gain.value = 0;
+
+  rainNoiseSource.connect(rainFilter);
+  rainFilter.connect(rainGain);
+  rainGain.connect(audioCtx.destination);
+
+  // --- RAIN LAYER 2: storm roar (lower freq noise) ---
+  stormNoiseSource = createNoiseNode(audioCtx);
+  stormFilter = audioCtx.createBiquadFilter();
+  stormFilter.type = 'lowpass';
+  stormFilter.frequency.value = 400;
+  stormFilter.Q.value = 0.3;
+  stormGain = audioCtx.createGain();
+  stormGain.gain.value = 0;
+
+  // warmth resonance on the storm layer
+  let stormWarmth = audioCtx.createBiquadFilter();
+  stormWarmth.type = 'peaking';
+  stormWarmth.frequency.value = 150;
+  stormWarmth.gain.value = 6;
+  stormWarmth.Q.value = 0.8;
+
+  stormNoiseSource.connect(stormFilter);
+  stormFilter.connect(stormWarmth);
+  stormWarmth.connect(stormGain);
+  stormGain.connect(audioCtx.destination);
+
+  // --- PATTER: master gain for bubble-hit ticks ---
+  patterGain = audioCtx.createGain();
+  patterGain.gain.value = 0.3;
+  patterGain.connect(audioCtx.destination);
+
+  audioInitialized = true;
+  showAudioPrompt = false;
+  console.log('Audio initialized');
+}
+
+function createNoiseNode(ctx) {
+  // 2-second looping white noise buffer
+  let bufferSize = ctx.sampleRate * 2;
+  let buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  let data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  let node = ctx.createBufferSource();
+  node.buffer = buffer;
+  node.loop = true;
+  node.start();
+  return node;
+}
+
+function updateAudio(stormLevel) {
+  if (!audioInitialized || !audioCtx) return;
+
+  let now = audioCtx.currentTime;
+
+  // light rain layer - fades in with movement, brightens with speed
+  let rainVol = map(stormLevel, 0, 0.5, 0, 0.12, true);
+  let rainFreq = map(stormLevel, 0, 1, 4000, 2000, true);
+  rainGain.gain.setTargetAtTime(rainVol, now, 0.3);
+  rainFilter.frequency.setTargetAtTime(rainFreq, now, 0.3);
+  rainFilter.Q.setTargetAtTime(map(stormLevel, 0, 1, 0.8, 0.2, true), now, 0.3);
+
+  // storm roar layer - kicks in at higher intensities
+  let stormVol = map(stormLevel, 0.3, 1, 0, 0.18, true);
+  let stormFreq = map(stormLevel, 0.3, 1, 300, 800, true);
+  stormGain.gain.setTargetAtTime(stormVol, now, 0.4);
+  stormFilter.frequency.setTargetAtTime(stormFreq, now, 0.4);
+}
+
+function triggerThunder(intensity) {
+  // intensity 0-1: controls volume, duration, and character
+  if (!audioInitialized || !audioCtx) return;
+
+  let now = audioCtx.currentTime;
+
+  // === CRACK: sharp high-freq noise burst ===
+  let crackLen = 0.15;
+  let crackBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * crackLen, audioCtx.sampleRate);
+  let crackData = crackBuffer.getChannelData(0);
+  for (let i = 0; i < crackData.length; i++) {
+    let t = i / crackData.length;
+    let env = t < 0.05 ? t / 0.05 : Math.exp(-(t - 0.05) * 12);
+    crackData[i] = (Math.random() * 2 - 1) * env;
+  }
+  let crackSource = audioCtx.createBufferSource();
+  crackSource.buffer = crackBuffer;
+
+  let crackFilter = audioCtx.createBiquadFilter();
+  crackFilter.type = 'highpass';
+  crackFilter.frequency.value = 2000;
+  crackFilter.Q.value = 0.5;
+
+  let crackGain = audioCtx.createGain();
+  crackGain.gain.value = 0.25 * intensity;
+
+  crackSource.connect(crackFilter);
+  crackFilter.connect(crackGain);
+  crackGain.connect(audioCtx.destination);
+  crackSource.start(now);
+
+  // === RUMBLE: long low-frequency rolling noise ===
+  let rumbleDuration = 1.0 + intensity * 2.0;
+  let rumbleBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * rumbleDuration, audioCtx.sampleRate);
+  let rumbleData = rumbleBuffer.getChannelData(0);
+  for (let i = 0; i < rumbleData.length; i++) {
+    let t = i / rumbleData.length;
+    let env = Math.sin(t * Math.PI * 0.5) * Math.exp(-t * 2.5);
+    rumbleData[i] = (Math.random() * 2 - 1) * env;
+  }
+  let rumbleSource = audioCtx.createBufferSource();
+  rumbleSource.buffer = rumbleBuffer;
+
+  let rumbleFilter = audioCtx.createBiquadFilter();
+  rumbleFilter.type = 'lowpass';
+  rumbleFilter.frequency.value = 200 + intensity * 100;
+  rumbleFilter.Q.value = 0.7;
+
+  let rumbleResonance = audioCtx.createBiquadFilter();
+  rumbleResonance.type = 'peaking';
+  rumbleResonance.frequency.value = 80;
+  rumbleResonance.gain.value = 8;
+  rumbleResonance.Q.value = 1.5;
+
+  let rumbleGain = audioCtx.createGain();
+  rumbleGain.gain.value = 0.35 * intensity;
+
+  rumbleSource.connect(rumbleFilter);
+  rumbleFilter.connect(rumbleResonance);
+  rumbleResonance.connect(rumbleGain);
+  rumbleGain.connect(audioCtx.destination);
+  rumbleSource.start(now + 0.04); // slight delay after crack
+
+  // === TONE SWEEP: falling pitch for that "strike" impact ===
+  let osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(200, now);
+  osc.frequency.exponentialRampToValueAtTime(30, now + 0.5);
+
+  let oscGain = audioCtx.createGain();
+  oscGain.gain.setValueAtTime(0.12 * intensity, now);
+  oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+  osc.connect(oscGain);
+  oscGain.connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + 0.7);
+}
+
+function triggerPatter() {
+  // tiny pitched tick for a raindrop hitting the bubble
+  if (!audioInitialized || !audioCtx || !patterGain) return;
+
+  let now = audioCtx.currentTime;
+
+  let osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  let freq = 800 + Math.random() * 2000;
+  osc.frequency.setValueAtTime(freq, now);
+  osc.frequency.exponentialRampToValueAtTime(freq * 0.3, now + 0.04);
+
+  let tickGain = audioCtx.createGain();
+  tickGain.gain.setValueAtTime(0.06 + Math.random() * 0.04, now);
+  tickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+
+  osc.connect(tickGain);
+  tickGain.connect(patterGain);
+  osc.start(now);
+  osc.stop(now + 0.06);
+}
+
+
+// ============================================================
+// MAIN DRAW
+// ============================================================
+
 function draw() {
   let wand = bodies[OBJECT_NAME];
 
@@ -99,6 +313,8 @@ function draw() {
       thunderTimer = 10 + random(20);
       spawnLightningBolt(bubbleX, bubbleY);
       bubbleGlow = 100;
+      // thunder sound scales with how violent the gesture was
+      triggerThunder(map(velocity, 150, 400, 0.5, 1.0, true));
     }
 
     prevX = x;
@@ -113,6 +329,9 @@ function draw() {
   // storm intensity 0-1
   let stormLevel = map(smoothVelocity, 0, 100, 0, 1, true);
   hueShift = frameCount * 0.3;
+
+  // update audio each frame
+  updateAudio(stormLevel);
 
   // ===== SKY =====
   drawSky(stormLevel);
@@ -141,11 +360,58 @@ function draw() {
   // ===== WAND BUBBLE =====
   drawBubble(stormLevel);
 
+  // ===== AUDIO PROMPT =====
+  if (showAudioPrompt) drawAudioPrompt();
+
   // ===== DEBUG INFO =====
   drawInfo(wand, stormLevel);
 }
 
-// ===== SKY GRADIENT =====
+
+// ============================================================
+// AUDIO PROMPT
+// ============================================================
+
+function drawAudioPrompt() {
+  fill(0, 0, 0, 40);
+  rect(0, 0, width, height);
+
+  let bw = 340;
+  let bh = 70;
+  let bx = width / 2 - bw / 2;
+  let by = height / 2 + 140;
+
+  fill(0, 0, 15, 85);
+  stroke(0, 0, 60, 40);
+  strokeWeight(1);
+  rect(bx, by, bw, bh, 12);
+
+  fill(0, 0, 100, 90);
+  noStroke();
+  textSize(16);
+  textAlign(CENTER, CENTER);
+  textFont('monospace');
+  text('click anywhere to enable sound', width / 2, by + bh / 2);
+}
+
+// browser requires a user gesture to start AudioContext
+function mousePressed() {
+  if (!audioInitialized) {
+    initAudio();
+  }
+}
+
+function keyPressed() {
+  if (!audioInitialized) {
+    initAudio();
+  }
+}
+
+
+// ============================================================
+// VISUALS
+// ============================================================
+
 function drawSky(stormLevel) {
   // gradient from top to bottom, shifting with storm
   let calmTopH = 210, calmTopS = 35, calmTopB = 55;
@@ -316,7 +582,7 @@ function updateAndDrawRain(stormLevel) {
     drop.x += drop.vx;
     drop.y += drop.vy;
 
-    // check bubble collision
+    // bubble collision
     let dx = drop.x - bubbleX;
     let dy = drop.y - bubbleY;
     let d = sqrt(dx * dx + dy * dy);
@@ -334,6 +600,9 @@ function updateAndDrawRain(stormLevel) {
       // splash at collision point
       spawnSplash(drop.x, drop.y, drop.hue);
       bubbleGlow = min(bubbleGlow + 8, 100);
+
+      // patter tick on bubble hit
+      triggerPatter();
     }
 
     // remove if off screen
@@ -432,7 +701,6 @@ function drawBubble(stormLevel) {
   ellipse(bubbleX - pulseR * 0.25, bubbleY - pulseR * 0.3, 8, 6);
 }
 
-// ===== DEBUG INFO =====
 function drawInfo(wand, stormLevel) {
   fill(0, 0, 100, 80);
   noStroke();
@@ -444,6 +712,7 @@ function drawInfo(wand, stormLevel) {
     text(`velocity  ${smoothVelocity.toFixed(1)}`, 20, 20);
     text(`rain      ${raindrops.length}`, 20, 40);
     text(`storm     ${(stormLevel * 100).toFixed(0)}%`, 20, 60);
+    text(`audio     ${audioInitialized ? 'on' : 'off'}`, 20, 80);
 
     fill(0, 0, 100, 40);
     textSize(13);
@@ -451,6 +720,7 @@ function drawInfo(wand, stormLevel) {
   } else {
     text('waiting for wand...', 20, 20);
     text(`connected: ${connected}`, 20, 40);
+    text(`audio     ${audioInitialized ? 'on' : 'click to enable'}`, 20, 60);
   }
 }
 
