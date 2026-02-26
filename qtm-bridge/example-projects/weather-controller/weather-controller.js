@@ -84,6 +84,12 @@ function draw() {
   if (wand && wand.isTracked) {
     let x = wand.position.x;
     let z = wand.position.z;
+
+    // map QTM coords to screen
+    bubbleTargetX = map(x, -VOLUME_WIDTH / 2, VOLUME_WIDTH / 2, 0, width);
+    bubbleTargetY = map(z, -VOLUME_HEIGHT / 2, VOLUME_HEIGHT / 2, 0, height);
+
+    // velocity
     velocity = dist(x, z, prevX, prevZ);
     smoothVelocity = lerp(smoothVelocity, velocity, 0.2);
 
