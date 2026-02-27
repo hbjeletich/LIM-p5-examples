@@ -4,42 +4,94 @@ const BRIDGE_PORT = 8080;
 const OBJECT_NAME = 'box';
 
 // QTM tracking volume dimensions (in mm)
-const VOLUME_WIDTH = 8200;  // 8.2 meters
-const VOLUME_HEIGHT = 6000; // 6 meters
+const VOLUME_WIDTH = 8200;
+const VOLUME_HEIGHT = 6000;
 
 // ===== CONNECTION =====
 let bodies = {};
 let socket;
 let connected = false;
 
-// ===== COLOR STATE =====
-let currentColor;
-let colorHistory = [];
-const MAX_HISTORY = 60;
+// ===== TILT STATE =====
+// "flat" reference pose: roll ~90, pitch 0, yaw 0
+const REST_ROLL = 90;
+const REST_PITCH = 0;
+const REST_YAW = 0;
 
-// ===== WATERCOLOR STATE =====
+let gravityX = 0;
+let gravityY = 0;
+let smoothGravX = 0;
+let smoothGravY = 0;
+const GRAVITY_SMOOTH = 0.15;
+
+// static tilt contribution (gentle background pull from angle)
+const TILT_STRENGTH = 0.06;
+// angular velocity contribution (reactive flick force)
+const VELOCITY_STRENGTH = 0.035;
+// dead zone: tilt angles below this (degrees) produce no force
+const TILT_DEAD_ZONE = 4.0;
+// dead zone: angular velocities below this (deg/frame) are ignored
+const VEL_DEAD_ZONE = 0.3;
+
+// previous frame rotation for computing angular velocity
+let prevRoll = null;
+let prevYaw = null;
+let angVelRoll = 0;
+let angVelYaw = 0;
+let smoothAngVelRoll = 0;
+let smoothAngVelYaw = 0;
+const ANG_VEL_SMOOTH = 0.25;
+
+// ===== PAINT DROPS =====
+let drops = [];
+const MAX_DROPS = 300;
+const FRICTION = 0.975;
+const MIN_SPEED = 0.08;
+
+// ===== RENDERING =====
 let paperTexture;
-let blobs = [];
-const MAX_BLOBS = 40;
+let pigmentLayer;
 let noiseOffset = 0;
-let pigmentLayer; // offscreen buffer for persistent paint
+
+// ===== COLOR PALETTE =====
+// predefined paint colors users can cycle through
+const PAINT_COLORS = [
+  [355, 70, 60],  // deep red
+  [25, 80, 75],   // burnt orange
+  [48, 75, 85],   // golden yellow
+  [160, 60, 50],  // teal green
+  [220, 65, 65],  // cobalt blue
+  [280, 55, 55],  // purple
+  [15, 30, 25],   // raw umber
+  [200, 10, 90],  // payne's grey
+];
+let currentPaletteIndex = 0;
+let currentPaintColor;
+
+// ===== SPAWN SETTINGS =====
+let isPouring = false;
+let pourX, pourY;
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
   colorMode(HSB, 360, 100, 100, 100);
-  currentColor = color(0, 50, 80);
 
-  // offscreen graphics buffer — paint accumulates here
+  currentPaintColor = PAINT_COLORS[currentPaletteIndex];
+
+  // offscreen buffer for persistent paint trails
   pigmentLayer = createGraphics(width, height);
   pigmentLayer.colorMode(HSB, 360, 100, 100, 100);
   pigmentLayer.clear();
 
-  // generate a paper texture once
+  // paper texture
   paperTexture = createGraphics(width, height);
   generatePaperTexture(paperTexture);
 
-  // connect to a websocket that's sending QTM data
-  // don't change this!
+  // default pour point
+  pourX = width / 2;
+  pourY = height / 2;
+
+  // connect to QTM websocket bridge
   socket = new WebSocket(`ws://${BRIDGE_IP}:${BRIDGE_PORT}`);
   socket.onopen = () => { connected = true; };
   socket.onmessage = (e) => {
@@ -56,16 +108,14 @@ function setup() {
 function generatePaperTexture(pg) {
   pg.loadPixels();
   for (let i = 0; i < pg.pixels.length; i += 4) {
-    // warm off-white with subtle noise
     let grain = random(-12, 12);
-    pg.pixels[i]     = 245 + grain; // R
-    pg.pixels[i + 1] = 240 + grain; // G
-    pg.pixels[i + 2] = 230 + grain; // B
-    pg.pixels[i + 3] = 255;         // A
+    pg.pixels[i]     = 245 + grain;
+    pg.pixels[i + 1] = 240 + grain;
+    pg.pixels[i + 2] = 230 + grain;
+    pg.pixels[i + 3] = 255;
   }
   pg.updatePixels();
 
-  // add some fiber-like streaks
   pg.stroke(220, 215, 200, 25);
   pg.strokeWeight(0.5);
   for (let i = 0; i < 300; i++) {
@@ -77,63 +127,78 @@ function generatePaperTexture(pg) {
   }
 }
 
-// ===== ORGANIC BLOB SHAPE =====
-// draws an irregular watercolor-like blob using noise-deformed vertices
-function drawWatercolorBlob(pg, cx, cy, baseRadius, col, layers) {
-  layers = layers || 5;
+// ===== PAINT DROP CLASS =====
+function createDrop(x, y, col, sizeBase) {
+  let spread = sizeBase * 0.6;
+  return {
+    x: x + random(-spread, spread),
+    y: y + random(-spread, spread),
+    vx: random(-0.5, 0.5),
+    vy: random(-0.5, 0.5),
+    radius: random(sizeBase * 0.4, sizeBase * 1.2),
+    h: col[0] + random(-8, 8),
+    s: col[1] + random(-5, 5),
+    b: col[2] + random(-5, 5),
+    life: 1.0,
+    decay: random(0.0005, 0.002), // how fast the drop dries out
+    wet: 1.0,        // wetness affects how much it responds to tilt
+    dryRate: random(0.0008, 0.003),
+    trail: [],       // recent positions for trail rendering
+    maxTrail: 12,
+    settled: false,
+  };
+}
 
+// ===== WATERCOLOR BLOB (for trail stamps) =====
+function stampBlob(pg, cx, cy, baseRadius, h, s, b, alpha) {
+  let layers = 4;
   for (let layer = 0; layer < layers; layer++) {
-    // each successive layer is slightly larger and more transparent
-    let layerRadius = baseRadius * (0.6 + layer * 0.15);
-    let layerAlpha = map(layer, 0, layers - 1, 12, 3);
+    let lr = baseRadius * (0.5 + layer * 0.2);
+    let la = alpha * map(layer, 0, layers - 1, 0.7, 0.2);
 
-    let h = hue(col);
-    let s = saturation(col);
-    let b = brightness(col);
-
-    pg.fill(h, s, b, layerAlpha);
+    pg.fill(h, constrain(s, 0, 100), constrain(b, 0, 100), la);
     pg.noStroke();
     pg.beginShape();
 
-    let noiseSeed = cx * 0.01 + cy * 0.01 + layer * 10;
-    let points = 36;
+    let nSeed = cx * 0.01 + cy * 0.01 + layer * 7;
+    let pts = 20;
 
-    for (let i = 0; i <= points; i++) {
-      let angle = map(i, 0, points, 0, TWO_PI);
-      // noise gives organic deformation; different per layer for raggedness
-      let noiseVal = noise(
-        noiseSeed + cos(angle) * 2,
-        noiseSeed + sin(angle) * 2,
-        noiseOffset * 0.002 + layer * 0.5
-      );
-      let r = layerRadius * (0.5 + noiseVal * 0.8);
-      // slight jitter per layer
-      let jitterX = random(-baseRadius * 0.05, baseRadius * 0.05);
-      let jitterY = random(-baseRadius * 0.05, baseRadius * 0.05);
-      pg.curveVertex(cx + cos(angle) * r + jitterX, cy + sin(angle) * r + jitterY);
+    for (let i = 0; i <= pts; i++) {
+      let angle = map(i, 0, pts, 0, TWO_PI);
+      let nv = noise(nSeed + cos(angle) * 1.8, nSeed + sin(angle) * 1.8, noiseOffset * 0.001 + layer * 0.3);
+      let r = lr * (0.55 + nv * 0.7);
+      pg.curveVertex(cx + cos(angle) * r, cy + sin(angle) * r);
     }
-
     pg.endShape(CLOSE);
   }
 }
 
-// ===== DRIP / BLEED EFFECT =====
-// small secondary bleeds that spread from a blob
-function drawBleeds(pg, cx, cy, baseRadius, col) {
-  let numBleeds = floor(random(2, 5));
-  for (let i = 0; i < numBleeds; i++) {
-    let angle = random(TWO_PI);
-    let dist = baseRadius * random(0.6, 1.4);
-    let bx = cx + cos(angle) * dist;
-    let by = cy + sin(angle) * dist;
-    let bSize = baseRadius * random(0.15, 0.4);
+// ===== DEAD ZONE HELPER =====
+// values within the dead zone return 0; outside, ramp smoothly from 0
+function applyDeadZone(value, zone) {
+  if (abs(value) < zone) return 0;
+  return (value - zone * Math.sign(value));
+}
 
-    let h = hue(col);
-    let s = saturation(col) * random(0.7, 1.0);
-    let b = brightness(col) * random(0.9, 1.1);
+// ===== SYMMETRY HELPERS =====
+// wrap-safe angle difference (handles -180/180 crossover)
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > 180) d -= 360;
+  while (d < -180) d += 360;
+  return d;
+}
 
-    drawWatercolorBlob(pg, bx, by, bSize, color(h, constrain(s, 0, 100), constrain(b, 0, 100)), 3);
-  }
+// fold angle deviation into -90..90 range for a symmetrical object
+// 0° and 180° are identical orientations, so deviation folds back at 90°
+function foldDeviation(dev) {
+  // normalize to -180..180 first
+  while (dev > 180) dev -= 360;
+  while (dev < -180) dev += 360;
+  // fold: beyond ±90° mirrors back
+  if (dev > 90) dev = 180 - dev;
+  if (dev < -90) dev = -180 - dev;
+  return dev;
 }
 
 // ===== MAIN DRAW =====
@@ -141,122 +206,313 @@ function draw() {
   noiseOffset++;
   let box = bodies[OBJECT_NAME];
 
+  // ---- compute gravity from tilt + angular velocity ----
   if (box && box.isTracked) {
-    // map rotation to color
-    let hue = map(box.rotation.x, -180, 180, 0, 360);
-    let sat = map(box.rotation.y, -180, 180, 20, 100);
-    let bri = map(box.rotation.z, -180, 180, 30, 100);
+    let currentRoll = box.rotation.x;
+    let currentYaw = box.rotation.z;
 
-    currentColor = color(hue, sat, bri);
-
-    // every few frames, drop a new watercolor blob onto the pigment layer
-    if (frameCount % 3 === 0) {
-      let blobX = width / 2 + random(-200, 200);
-      let blobY = height / 2 + random(-150, 150);
-      let blobSize = random(60, 200);
-
-      drawWatercolorBlob(pigmentLayer, blobX, blobY, blobSize, currentColor, 6);
-      drawBleeds(pigmentLayer, blobX, blobY, blobSize, currentColor);
+    // compute angular velocity with wrap-safe diff
+    if (prevRoll !== null) {
+      angVelRoll = angleDiff(currentRoll, prevRoll);
+      angVelYaw = angleDiff(currentYaw, prevYaw);
     }
+    prevRoll = currentRoll;
+    prevYaw = currentYaw;
 
-    // also track blobs for the slow "spreading" animation
-    if (frameCount % 8 === 0) {
-      blobs.push({
-        x: width / 2 + random(-180, 180),
-        y: height / 2 + random(-130, 130),
-        size: random(40, 120),
-        maxSize: random(120, 280),
-        growRate: random(0.3, 1.2),
-        col: color(hue, sat, bri),
-        age: 0,
-        maxAge: random(80, 200),
-      });
-      if (blobs.length > MAX_BLOBS) blobs.shift();
+    // smooth angular velocity
+    smoothAngVelRoll = lerp(smoothAngVelRoll, angVelRoll, ANG_VEL_SMOOTH);
+    smoothAngVelYaw = lerp(smoothAngVelYaw, angVelYaw, ANG_VEL_SMOOTH);
+
+    // deviations from rest pose, folded for symmetry (box has no up/down)
+    let rollDev = foldDeviation(currentRoll - REST_ROLL);
+    let yawDev = foldDeviation(currentYaw - REST_YAW);
+
+    // apply dead zone to tilt angle
+    let tiltForceY = applyDeadZone(rollDev, TILT_DEAD_ZONE) * TILT_STRENGTH;
+    let tiltForceX = applyDeadZone(yawDev, TILT_DEAD_ZONE) * TILT_STRENGTH;
+
+    // apply dead zone to angular velocity
+    let velForceY = applyDeadZone(smoothAngVelRoll, VEL_DEAD_ZONE) * VELOCITY_STRENGTH;
+    let velForceX = applyDeadZone(smoothAngVelYaw, VEL_DEAD_ZONE) * VELOCITY_STRENGTH;
+
+    // combine: gentle tilt pull + reactive velocity kick
+    gravityX = -(sin(radians(tiltForceX)) + velForceX);
+    gravityY = sin(radians(tiltForceY)) + velForceY;
+  }
+
+  // smooth the final gravity so it doesn't jitter
+  smoothGravX = lerp(smoothGravX, gravityX, GRAVITY_SMOOTH);
+  smoothGravY = lerp(smoothGravY, gravityY, GRAVITY_SMOOTH);
+
+  let tiltMag = sqrt(smoothGravX * smoothGravX + smoothGravY * smoothGravY);
+
+  // ---- spawn drops when pouring ----
+  if (isPouring && frameCount % 2 === 0) {
+    let numDrops = floor(random(2, 5));
+    for (let i = 0; i < numDrops; i++) {
+      if (drops.length < MAX_DROPS) {
+        drops.push(createDrop(pourX, pourY, currentPaintColor, random(22, 100)));
+      }
     }
   }
 
-  // === RENDER ===
+  // ---- update drops ----
+  for (let i = drops.length - 1; i >= 0; i--) {
+    let d = drops[i];
+
+    // apply gravity based on tilt (scaled by wetness)
+    d.vx += smoothGravX * d.wet;
+    d.vy += smoothGravY * d.wet;
+
+    // friction
+    d.vx *= FRICTION;
+    d.vy *= FRICTION;
+
+    // add a tiny bit of noise wander for organic feel
+    d.vx += (noise(d.x * 0.01, d.y * 0.01, noiseOffset * 0.005) - 0.5) * 0.15 * d.wet;
+    d.vy += (noise(d.y * 0.01, d.x * 0.01, noiseOffset * 0.005 + 100) - 0.5) * 0.15 * d.wet;
+
+    let speed = sqrt(d.vx * d.vx + d.vy * d.vy);
+
+    // move
+    d.x += d.vx;
+    d.y += d.vy;
+
+    // dry out over time
+    d.wet = max(0, d.wet - d.dryRate);
+    d.life -= d.decay;
+
+    // track trail
+    d.trail.push({ x: d.x, y: d.y });
+    if (d.trail.length > d.maxTrail) d.trail.shift();
+
+    // stamp paint onto pigment layer as it moves
+    if (speed > MIN_SPEED && d.wet > 0.05) {
+      // faster = thinner, more streaky trail; slower = fatter, pooling
+      let stampRadius = d.radius * map(speed, 0, 4, 1.3, 0.4, true);
+      let stampAlpha = map(speed, 0, 3, 6, 2, true) * d.wet;
+
+      stampBlob(pigmentLayer, d.x, d.y, stampRadius, d.h, d.s, d.b, stampAlpha);
+    } else if (d.wet > 0.1) {
+      // pooling — slow/stationary drops spread out
+      let poolRadius = d.radius * 1.1;
+      stampBlob(pigmentLayer, d.x, d.y, poolRadius, d.h, d.s, d.b, 2.5 * d.wet);
+      d.radius += 0.05 * d.wet; // slowly grows as it pools
+    }
+
+    // settled = nearly dry and slow
+    if (d.wet < 0.05 && speed < MIN_SPEED) {
+      d.settled = true;
+    }
+
+    // remove dead drops
+    if (d.life <= 0 || d.settled) {
+      // final stamp — the "dried" mark
+      stampBlob(pigmentLayer, d.x, d.y, d.radius * 0.9, d.h, d.s, d.b, 5);
+      drops.splice(i, 1);
+    }
+
+    // keep in bounds (bounce softly)
+    if (d.x < 0) { d.x = 0; d.vx *= -0.3; }
+    if (d.x > width) { d.x = width; d.vx *= -0.3; }
+    if (d.y < 0) { d.y = 0; d.vy *= -0.3; }
+    if (d.y > height) { d.y = height; d.vy *= -0.3; }
+  }
+
+  // ===== RENDER =====
 
   // 1. paper background
   image(paperTexture, 0, 0);
 
-  // 2. accumulated pigment layer (persistent paint)
-  // apply slight fade so old paint slowly dries / lightens
-  pigmentLayer.fill(45, 5, 95, 1.5); // very faint warm wash to age old strokes
+  // 2. paint fades over time — warm wash slowly erases old paint
+  pigmentLayer.fill(45, 5, 95, 2.5);
   pigmentLayer.noStroke();
   pigmentLayer.rect(0, 0, width, height);
+
+  // 3. persistent pigment
   image(pigmentLayer, 0, 0);
 
-  // 3. animate growing blobs (wet paint spreading)
-  for (let i = blobs.length - 1; i >= 0; i--) {
-    let blob = blobs[i];
-    blob.age++;
-    blob.size = min(blob.size + blob.growRate, blob.maxSize);
-
-    // fade out as they age
-    let lifeRatio = blob.age / blob.maxAge;
-    let alpha = map(lifeRatio, 0, 1, 10, 0);
-
-    if (alpha <= 0.5) {
-      blobs.splice(i, 1);
-      continue;
+  // 4. live wet drops (rendered on top with a glistening look)
+  for (let d of drops) {
+    if (d.wet > 0.05) {
+      let alpha = map(d.wet, 0, 1, 3, 18);
+      // wet highlight — slightly brighter, slightly transparent blob
+      drawWetDrop(d, alpha);
     }
-
-    let h = hue(blob.col);
-    let s = saturation(blob.col);
-    let b = brightness(blob.col);
-    let fadedCol = color(h, s, b, alpha);
-
-    drawWatercolorBlob(this, blob.x, blob.y, blob.size, fadedCol, 3);
   }
 
-  // 4. central swatch — a large soft watercolor blob showing the current mix
-  push();
-  drawWatercolorBlob(this, width / 2, height / 2, 130, currentColor, 8);
-  pop();
-
-  // 5. subtle paper grain overlay (multiply-ish darkening)
+  // 5. grain overlay
   drawGrainOverlay();
 
-  // 6. debug info
+  // 6. tilt indicator
+  drawTiltIndicator();
+
+  // 7. UI
   drawInfo(box);
+  drawPalette();
+}
+
+// ===== WET DROP RENDERING =====
+function drawWetDrop(d, alpha) {
+  // main body
+  fill(d.h, constrain(d.s, 0, 100), constrain(d.b, 0, 100), alpha);
+  noStroke();
+
+  let pts = 14;
+  beginShape();
+  for (let i = 0; i <= pts; i++) {
+    let angle = map(i, 0, pts, 0, TWO_PI);
+    let nv = noise(d.x * 0.02 + cos(angle), d.y * 0.02 + sin(angle), noiseOffset * 0.003);
+    let r = d.radius * (0.6 + nv * 0.5);
+    curveVertex(d.x + cos(angle) * r, d.y + sin(angle) * r);
+  }
+  endShape(CLOSE);
+
+  // wet sheen — a lighter highlight
+  fill(d.h, constrain(d.s - 20, 0, 100), constrain(d.b + 20, 0, 100), alpha * 0.3);
+  ellipse(d.x - d.radius * 0.15, d.y - d.radius * 0.15, d.radius * 0.5, d.radius * 0.4);
+}
+
+// ===== TILT INDICATOR =====
+function drawTiltIndicator() {
+  let cx = 60;
+  let cy = height - 60;
+  let indicatorSize = 40;
+
+  // outer ring
+  noFill();
+  stroke(0, 0, 50, 30);
+  strokeWeight(1.5);
+  ellipse(cx, cy, indicatorSize * 2);
+
+  // crosshair
+  stroke(0, 0, 50, 15);
+  line(cx - indicatorSize, cy, cx + indicatorSize, cy);
+  line(cx, cy - indicatorSize, cx, cy + indicatorSize);
+
+  // tilt dot
+  let dotX = cx + smoothGravX * indicatorSize * 3;
+  let dotY = cy + smoothGravY * indicatorSize * 3;
+  fill(0, 0, 30, 50);
+  noStroke();
+  ellipse(dotX, dotY, 8);
+
+  // tilt line
+  stroke(0, 0, 30, 30);
+  strokeWeight(1);
+  line(cx, cy, dotX, dotY);
 }
 
 // ===== GRAIN OVERLAY =====
 function drawGrainOverlay() {
-  // scattered tiny specks to mimic pigment granulation
   noStroke();
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 80; i++) {
     let gx = random(width);
     let gy = random(height);
-    fill(30, 10, 20, random(1, 4));
+    fill(30, 10, 20, random(1, 3));
     ellipse(gx, gy, random(1, 3));
   }
+}
+
+// ===== COLOR PALETTE UI =====
+function drawPalette() {
+  let startX = width - 30;
+  let startY = height / 2 - (PAINT_COLORS.length * 36) / 2;
+
+  for (let i = 0; i < PAINT_COLORS.length; i++) {
+    let c = PAINT_COLORS[i];
+    let y = startY + i * 36;
+
+    // swatch
+    if (i === currentPaletteIndex) {
+      stroke(0, 0, 100, 60);
+      strokeWeight(2.5);
+    } else {
+      stroke(0, 0, 40, 30);
+      strokeWeight(1);
+    }
+    fill(c[0], c[1], c[2], 80);
+    ellipse(startX, y, 22);
+  }
+
+  // label
+  fill(0, 0, 40);
+  noStroke();
+  textSize(10);
+  textFont('monospace');
+  textAlign(CENTER);
+  text('1-8', startX, startY + PAINT_COLORS.length * 36 + 12);
 }
 
 // ===== DEBUG INFO =====
 function drawInfo(box) {
   fill(0, 0, 30);
   noStroke();
-  textSize(14);
+  textSize(13);
   textFont('monospace');
   textAlign(LEFT, TOP);
 
   if (box && box.isTracked) {
-    text(`Roll  → Hue:        ${box.rotation.x.toFixed(1)}°`, 20, 20);
-    text(`Pitch → Saturation:  ${box.rotation.y.toFixed(1)}°`, 20, 42);
-    text(`Yaw   → Brightness:  ${box.rotation.z.toFixed(1)}°`, 20, 64);
+    let rollDev = foldDeviation(box.rotation.x - REST_ROLL).toFixed(1);
+    let yawDev = foldDeviation(box.rotation.z - REST_YAW).toFixed(1);
+    text(`roll tilt:  ${rollDev}° (folded)  →  gravity Y`, 20, 20);
+    text(`yaw tilt:   ${yawDev}° (folded)  →  gravity X`, 20, 40);
+    text(`ang vel:    roll ${smoothAngVelRoll.toFixed(2)}  yaw ${smoothAngVelYaw.toFixed(2)}`, 20, 60);
+    text(`drops: ${drops.length}`, 20, 80);
   } else {
     text('Waiting for box...', 20, 20);
-    text(`Connected: ${connected}`, 20, 42);
+    text(`Connected: ${connected}`, 20, 40);
   }
+
+  // instructions
+  fill(0, 0, 45);
+  textSize(11);
+  textAlign(LEFT, BOTTOM);
+  text('click+hold: pour paint  |  1-8: pick color  |  space: clear', 20, height - 20);
 }
 
-// ===== CLEAR ON CLICK =====
+// ===== INPUT =====
 function mousePressed() {
-  // click to clear the canvas — fresh paper
-  pigmentLayer.clear();
-  blobs = [];
+  // check if clicking a palette swatch
+  let startX = width - 30;
+  let startY = height / 2 - (PAINT_COLORS.length * 36) / 2;
+  for (let i = 0; i < PAINT_COLORS.length; i++) {
+    let y = startY + i * 36;
+    if (dist(mouseX, mouseY, startX, y) < 14) {
+      currentPaletteIndex = i;
+      currentPaintColor = PAINT_COLORS[i];
+      return;
+    }
+  }
+
+  // start pouring
+  isPouring = true;
+  pourX = mouseX;
+  pourY = mouseY;
+}
+
+function mouseDragged() {
+  pourX = mouseX;
+  pourY = mouseY;
+}
+
+function mouseReleased() {
+  isPouring = false;
+}
+
+function keyPressed() {
+  // number keys 1-8 to select paint color
+  let num = int(key);
+  if (num >= 1 && num <= PAINT_COLORS.length) {
+    currentPaletteIndex = num - 1;
+    currentPaintColor = PAINT_COLORS[currentPaletteIndex];
+  }
+
+  // space to clear
+  if (key === ' ') {
+    pigmentLayer.clear();
+    drops = [];
+  }
 }
 
 function windowResized() {
@@ -266,5 +522,5 @@ function windowResized() {
   pigmentLayer.clear();
   paperTexture = createGraphics(width, height);
   generatePaperTexture(paperTexture);
-  blobs = [];
+  drops = [];
 }
