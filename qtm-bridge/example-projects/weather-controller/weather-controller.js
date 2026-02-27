@@ -5,7 +5,7 @@ const OBJECT_NAME = 'wand';
 
 // QTM tracking volume dimensions (in mm)
 const VOLUME_WIDTH = 8200;
-const VOLUME_HEIGHT = 6000;
+const VOLUME_HEIGHT = 2500; // height of the room
 
 // ===== CONNECTION =====
 let bodies = {};
@@ -301,7 +301,7 @@ function draw() {
 
     // map QTM coords to screen
     bubbleTargetX = map(x, -VOLUME_WIDTH / 2, VOLUME_WIDTH / 2, 0, width);
-    bubbleTargetY = map(z, -VOLUME_HEIGHT / 2, VOLUME_HEIGHT / 2, 0, height);
+    bubbleTargetY = map(z, VOLUME_HEIGHT, 0, 0, height);
 
     // velocity
     velocity = dist(x, z, prevX, prevZ);
@@ -358,7 +358,7 @@ function draw() {
   updateAndDrawSplashes();
 
   // ===== WAND BUBBLE =====
-  drawBubble(stormLevel);
+  //drawBubble(stormLevel);
 
   // ===== AUDIO PROMPT =====
   if (showAudioPrompt) drawAudioPrompt();
