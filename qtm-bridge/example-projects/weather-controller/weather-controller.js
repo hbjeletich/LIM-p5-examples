@@ -70,14 +70,7 @@ function setup() {
 
   // init clouds
   for (let i = 0; i < 8; i++) {
-    clouds.push({
-      x: random(width),
-      y: random(height * 0.05, height * 0.3),
-      w: random(200, 450),
-      h: random(40, 80),
-      speed: random(0.2, 0.8),
-      opacity: random(30, 60)
-    });
+    clouds.push(createCloud(random(width)));
   }
 
   // connect to websocket sending QTM data
@@ -91,6 +84,37 @@ function setup() {
   socket.onclose = () => {
     connected = false;
     setTimeout(() => location.reload(), 2000);
+  };
+}
+
+// ===== CLOUD FACTORY =====
+function createCloud(startX) {
+  // each cloud is a cluster of overlapping puffs
+  let baseY = random(height * 0.03, height * 0.28);
+  let baseW = random(200, 500);
+  let numPuffs = floor(random(5, 12));
+  let puffs = [];
+
+  for (let j = 0; j < numPuffs; j++) {
+    // puffs cluster around center, biased upward
+    let px = random(-baseW * 0.4, baseW * 0.4);
+    let py = random(-baseW * 0.08, baseW * 0.06);
+    // larger puffs near center, smaller at edges
+    let distFromCenter = abs(px) / (baseW * 0.4);
+    let puffR = baseW * random(0.12, 0.28) * (1 - distFromCenter * 0.5);
+    // noise seed unique to this puff for organic deformation
+    let nSeed = random(1000);
+    puffs.push({ ox: px, oy: py, r: puffR, nSeed: nSeed });
+  }
+
+  return {
+    x: startX,
+    y: baseY,
+    w: baseW,
+    speed: random(0.15, 0.7),
+    opacity: random(35, 65),
+    puffs: puffs,
+    nOffset: random(1000), // per-cloud noise animation offset
   };
 }
 
@@ -443,19 +467,67 @@ function drawSky(stormLevel) {
 
 // ===== CLOUDS =====
 function drawClouds(stormLevel) {
+  let time = frameCount * 0.008;
+
   for (let c of clouds) {
     c.x += c.speed * (1 + stormLevel * 3);
-    if (c.x > width + c.w) c.x = -c.w;
+    if (c.x > width + c.w) {
+      // recycle cloud with new shape
+      let recycled = createCloud(-c.w);
+      c.puffs = recycled.puffs;
+      c.x = -c.w;
+      c.y = recycled.y;
+      c.w = recycled.w;
+      c.nOffset = recycled.nOffset;
+    }
 
     let darkness = lerp(80, 25, stormLevel);
     let op = lerp(c.opacity, c.opacity * 1.5, stormLevel);
 
-    fill(220, 15, darkness, min(op, 80));
     noStroke();
-    // layered ellipses for cloud shape
-    ellipse(c.x, c.y, c.w, c.h);
-    ellipse(c.x - c.w * 0.25, c.y + c.h * 0.1, c.w * 0.6, c.h * 0.7);
-    ellipse(c.x + c.w * 0.2, c.y - c.h * 0.1, c.w * 0.5, c.h * 0.8);
+
+    // draw each puff as a noise-deformed organic blob
+    for (let p of c.puffs) {
+      let cx = c.x + p.ox;
+      let cy = c.y + p.oy;
+
+      // multiple transparency layers for soft volumetric feel
+      let layers = 3;
+      for (let layer = 0; layer < layers; layer++) {
+        let layerR = p.r * (0.7 + layer * 0.2);
+        let layerAlpha = min(op, 80) * map(layer, 0, layers - 1, 0.5, 0.15);
+
+        // slightly different brightness per layer for depth
+        let layerBright = darkness + layer * 3;
+        fill(220, 15, layerBright, layerAlpha);
+
+        beginShape();
+        let pts = 24;
+        for (let i = 0; i <= pts; i++) {
+          let angle = map(i, 0, pts, 0, TWO_PI);
+          let nv = noise(
+            p.nSeed + cos(angle) * 1.5,
+            p.nSeed + sin(angle) * 1.5,
+            time + c.nOffset + layer * 0.4
+          );
+          // organic deformation — more on the horizontal axis for cloud-like stretch
+          let rx = layerR * (0.6 + nv * 0.7) * 1.3;
+          let ry = layerR * (0.5 + nv * 0.6);
+          curveVertex(cx + cos(angle) * rx, cy + sin(angle) * ry);
+        }
+        endShape(CLOSE);
+      }
+    }
+
+    // soft underbelly glow during storms (lit from lightning)
+    if (stormLevel > 0.3 && lightning > 5) {
+      let glowAlpha = map(lightning, 5, 100, 0, 15) * stormLevel;
+      fill(220, 20, 95, glowAlpha);
+      noStroke();
+      for (let p of c.puffs) {
+        ellipse(c.x + p.ox, c.y + p.oy + p.r * 0.3, p.r * 1.6, p.r * 0.8);
+      }
+    }
   }
 }
 
@@ -554,12 +626,21 @@ function spawnRain(stormLevel) {
   let rainAmount = map(smoothVelocity, 0, 100, 0, 25, true);
   for (let i = 0; i < rainAmount; i++) {
     let baseHue = (200 + hueShift * 0.1 + random(-20, 20)) % 360;
+
+    // base wind pushes drops sideways, stronger in storms
+    let windVx = random(-0.5, 0.5) + stormLevel * random(1, 3);
+    let baseVy = random(6, 14) * (1 + stormLevel * 0.5);
+
     raindrops.push({
-      x: random(width),
+      x: random(-50, width + 50),
       y: random(-30, -120),
-      vx: random(-1, 1) * (1 + stormLevel * 2),
-      vy: random(6, 14) * (1 + stormLevel * 0.5),
+      vx: windVx,
+      vy: baseVy,
+      // per-drop noise wander so they don't all fall in parallel
+      noiseSeed: random(1000),
+      wobbleAmp: random(0.3, 1.2),
       length: random(10, 28),
+      thickness: random(1.2, 2.5),
       hue: baseHue,
       sat: random(30, 60),
       bright: random(60, 90),
@@ -569,18 +650,27 @@ function spawnRain(stormLevel) {
 }
 
 function updateAndDrawRain(stormLevel) {
-  strokeWeight(2);
+  let time = frameCount * 0.02;
+
   for (let i = raindrops.length - 1; i >= 0; i--) {
     let drop = raindrops[i];
 
-    // draw
-    let c = color(drop.hue, drop.sat, drop.bright, drop.alpha);
-    stroke(c);
-    line(drop.x, drop.y, drop.x + drop.vx * 0.5, drop.y + drop.length);
+    // noise-based wobble — each drop sways independently
+    let wobble = (noise(drop.noiseSeed, drop.y * 0.01, time) - 0.5) * drop.wobbleAmp;
+    drop.vx += wobble * 0.1;
 
     // move
     drop.x += drop.vx;
     drop.y += drop.vy;
+
+    // draw — line angled along actual velocity vector, not just straight down
+    let angle = atan2(drop.vy, drop.vx);
+    let endX = drop.x + cos(angle) * drop.length;
+    let endY = drop.y + sin(angle) * drop.length;
+
+    strokeWeight(drop.thickness);
+    stroke(drop.hue, drop.sat, drop.bright, drop.alpha);
+    line(drop.x, drop.y, endX, endY);
 
     // bubble collision
     let dx = drop.x - bubbleX;
@@ -590,12 +680,12 @@ function updateAndDrawRain(stormLevel) {
 
     if (d < pulseR + 5) {
       // bounce off bubble
-      let angle = atan2(dy, dx);
+      let bAngle = atan2(dy, dx);
       let speed = sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
-      drop.vx = cos(angle) * speed * 0.7 + random(-1, 1);
-      drop.vy = sin(angle) * speed * 0.6;
-      drop.x = bubbleX + cos(angle) * (pulseR + 8);
-      drop.y = bubbleY + sin(angle) * (pulseR + 8);
+      drop.vx = cos(bAngle) * speed * 0.7 + random(-1, 1);
+      drop.vy = sin(bAngle) * speed * 0.6;
+      drop.x = bubbleX + cos(bAngle) * (pulseR + 8);
+      drop.y = bubbleY + sin(bAngle) * (pulseR + 8);
 
       // splash at collision point
       spawnSplash(drop.x, drop.y, drop.hue);
