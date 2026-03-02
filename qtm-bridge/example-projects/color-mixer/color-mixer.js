@@ -53,30 +53,19 @@ let paperTexture;
 let pigmentLayer;
 let noiseOffset = 0;
 
-// ===== COLOR PALETTE =====
-// predefined paint colors users can cycle through
-const PAINT_COLORS = [
-  [355, 70, 60],  // deep red
-  [25, 80, 75],   // burnt orange
-  [48, 75, 85],   // golden yellow
-  [160, 60, 50],  // teal green
-  [220, 65, 65],  // cobalt blue
-  [280, 55, 55],  // purple
-  [15, 30, 25],   // raw umber
-  [200, 10, 90],  // payne's grey
-];
-let currentPaletteIndex = 0;
-let currentPaintColor;
+// ===== COLOR STATE =====
+// HSB mapped from box rotation
+let currentH = 0;
+let currentS = 50;
+let currentB = 80;
 
 // ===== SPAWN SETTINGS =====
-let isPouring = false;
-let pourX, pourY;
+const SPAWN_INTERVAL = 4;  // frames between spawn bursts
+const DROPS_PER_SPAWN = 2; // drops per burst
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
   colorMode(HSB, 360, 100, 100, 100);
-
-  currentPaintColor = PAINT_COLORS[currentPaletteIndex];
 
   // offscreen buffer for persistent paint trails
   pigmentLayer = createGraphics(width, height);
@@ -86,10 +75,6 @@ function setup() {
   // paper texture
   paperTexture = createGraphics(width, height);
   generatePaperTexture(paperTexture);
-
-  // default pour point
-  pourX = width / 2;
-  pourY = height / 2;
 
   // connect to QTM websocket bridge
   socket = new WebSocket(`ws://${BRIDGE_IP}:${BRIDGE_PORT}`);
@@ -238,6 +223,11 @@ function draw() {
     // combine: gentle tilt pull + reactive velocity kick
     gravityX = -(sin(radians(tiltForceX)) + velForceX);
     gravityY = sin(radians(tiltForceY)) + velForceY;
+
+    // map rotation to color
+    currentH = map(box.rotation.x, -180, 180, 0, 360);
+    currentS = map(box.rotation.y, -180, 180, 20, 100);
+    currentB = map(box.rotation.z, -180, 180, 30, 100);
   }
 
   // smooth the final gravity so it doesn't jitter
@@ -246,12 +236,13 @@ function draw() {
 
   let tiltMag = sqrt(smoothGravX * smoothGravX + smoothGravY * smoothGravY);
 
-  // ---- spawn drops when pouring ----
-  if (isPouring && frameCount % 2 === 0) {
-    let numDrops = floor(random(2, 5));
-    for (let i = 0; i < numDrops; i++) {
+  // ---- spawn drops at random positions on interval ----
+  if (frameCount % SPAWN_INTERVAL === 0) {
+    for (let i = 0; i < DROPS_PER_SPAWN; i++) {
       if (drops.length < MAX_DROPS) {
-        drops.push(createDrop(pourX, pourY, currentPaintColor, random(22, 100)));
+        let spawnX = random(width * 0.1, width * 0.9);
+        let spawnY = random(height * 0.1, height * 0.9);
+        drops.push(createDrop(spawnX, spawnY, [currentH, currentS, currentB], random(22, 100)));
       }
     }
   }
@@ -349,7 +340,6 @@ function draw() {
 
   // 7. UI
   drawInfo(box);
-  drawPalette();
 }
 
 // ===== WET DROP RENDERING =====
@@ -414,36 +404,6 @@ function drawGrainOverlay() {
   }
 }
 
-// ===== COLOR PALETTE UI =====
-function drawPalette() {
-  let startX = width - 30;
-  let startY = height / 2 - (PAINT_COLORS.length * 36) / 2;
-
-  for (let i = 0; i < PAINT_COLORS.length; i++) {
-    let c = PAINT_COLORS[i];
-    let y = startY + i * 36;
-
-    // swatch
-    if (i === currentPaletteIndex) {
-      stroke(0, 0, 100, 60);
-      strokeWeight(2.5);
-    } else {
-      stroke(0, 0, 40, 30);
-      strokeWeight(1);
-    }
-    fill(c[0], c[1], c[2], 80);
-    ellipse(startX, y, 22);
-  }
-
-  // label
-  fill(0, 0, 40);
-  noStroke();
-  textSize(10);
-  textFont('monospace');
-  textAlign(CENTER);
-  text('1-8', startX, startY + PAINT_COLORS.length * 36 + 12);
-}
-
 // ===== DEBUG INFO =====
 function drawInfo(box) {
   fill(0, 0, 30);
@@ -458,57 +418,35 @@ function drawInfo(box) {
     text(`roll tilt:  ${rollDev}° (folded)  →  gravity Y`, 20, 20);
     text(`yaw tilt:   ${yawDev}° (folded)  →  gravity X`, 20, 40);
     text(`ang vel:    roll ${smoothAngVelRoll.toFixed(2)}  yaw ${smoothAngVelYaw.toFixed(2)}`, 20, 60);
-    text(`drops: ${drops.length}`, 20, 80);
+    text(`color HSB:  ${currentH.toFixed(0)} / ${currentS.toFixed(0)} / ${currentB.toFixed(0)}`, 20, 80);
+    text(`drops: ${drops.length}`, 20, 100);
   } else {
     text('Waiting for box...', 20, 20);
     text(`Connected: ${connected}`, 20, 40);
   }
 
+  // current color swatch
+  fill(currentH, currentS, currentB, 70);
+  stroke(0, 0, 50, 30);
+  strokeWeight(1);
+  ellipse(width - 30, 30, 30);
+
   // instructions
   fill(0, 0, 45);
+  noStroke();
   textSize(11);
   textAlign(LEFT, BOTTOM);
-  text('click+hold: pour paint  |  1-8: pick color  |  space: clear', 20, height - 20);
+  text('click: clear canvas  |  space: clear', 20, height - 20);
 }
 
 // ===== INPUT =====
 function mousePressed() {
-  // check if clicking a palette swatch
-  let startX = width - 30;
-  let startY = height / 2 - (PAINT_COLORS.length * 36) / 2;
-  for (let i = 0; i < PAINT_COLORS.length; i++) {
-    let y = startY + i * 36;
-    if (dist(mouseX, mouseY, startX, y) < 14) {
-      currentPaletteIndex = i;
-      currentPaintColor = PAINT_COLORS[i];
-      return;
-    }
-  }
-
-  // start pouring
-  isPouring = true;
-  pourX = mouseX;
-  pourY = mouseY;
-}
-
-function mouseDragged() {
-  pourX = mouseX;
-  pourY = mouseY;
-}
-
-function mouseReleased() {
-  isPouring = false;
+  // click to clear
+  pigmentLayer.clear();
+  drops = [];
 }
 
 function keyPressed() {
-  // number keys 1-8 to select paint color
-  let num = int(key);
-  if (num >= 1 && num <= PAINT_COLORS.length) {
-    currentPaletteIndex = num - 1;
-    currentPaintColor = PAINT_COLORS[currentPaletteIndex];
-  }
-
-  // space to clear
   if (key === ' ') {
     pigmentLayer.clear();
     drops = [];
