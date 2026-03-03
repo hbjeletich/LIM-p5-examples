@@ -1,7 +1,7 @@
 // ===== CONFIGURATION =====
 const BRIDGE_IP = '192.168.10.3';
 const BRIDGE_PORT = 8080;
-const OBJECT_NAME = 'wand';
+const OBJECT_NAME = 'bolt';
 
 // QTM tracking volume dimensions (in mm)
 const VOLUME_WIDTH = 8200;
@@ -682,8 +682,8 @@ function updateAndDrawRain(stormLevel) {
       // bounce off bubble
       let bAngle = atan2(dy, dx);
       let speed = sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
-      drop.vx = cos(bAngle) * speed * 0.7 + random(-1, 1);
-      drop.vy = sin(bAngle) * speed * 0.6;
+      drop.vx = cos(bAngle) * speed * 0.3 + random(-1, 1);
+      drop.vy = sin(bAngle) * speed * -3;
       drop.x = bubbleX + cos(bAngle) * (pulseR + 8);
       drop.y = bubbleY + sin(bAngle) * (pulseR + 8);
 
@@ -734,7 +734,7 @@ function updateAndDrawSplashes() {
     let s = splashes[i];
     s.x += s.vx;
     s.y += s.vy;
-    s.vy += 0.15; // gravity
+    s.vy += 0.98;
     s.life -= s.decay;
 
     if (s.life <= 0) {
