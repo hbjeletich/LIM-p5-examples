@@ -59,7 +59,8 @@ function draw() {
     // ex: map x,y to screen position
     let screenX = map(x, -VOLUME_WIDTH/2, VOLUME_WIDTH/2, 0, width);
     let screenY = map(y, -VOLUME_HEIGHT/2, VOLUME_HEIGHT/2, height, 0);
-    
+    // let screenY = map(z, 0, 3000, height, 0);
+
     // draw circle at screenX, screenY
     fill(100, 200, 255);
     noStroke();

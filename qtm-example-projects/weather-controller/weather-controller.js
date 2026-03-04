@@ -1,7 +1,7 @@
 // ===== CONFIGURATION =====
 const BRIDGE_IP = '192.168.10.3';
 const BRIDGE_PORT = 8080;
-const OBJECT_NAME = 'bolt';
+const OBJECT_NAME = 'wand';
 
 // QTM tracking volume dimensions (in mm)
 const VOLUME_WIDTH = 8200;
